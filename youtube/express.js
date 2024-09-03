@@ -1,13 +1,17 @@
 require("dotenv").config();
 
+const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const url = require("url");
-const { google } = require("googleapis");
+const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
+const { google } = require("googleapis");
+
 const readVideosFromDataFolder = require("./src/readVideosFromDataFolder");
+const readAddedToPlaylistFile = require("./src/readAddedToPlaylistFile");
 
 const oauth2Client = new google.auth.OAuth2(process.env.CLIENT_ID, process.env.CLIENT_SECRET, process.env.REDIRECT_URI);
 
@@ -55,87 +59,20 @@ async function main() {
     res.end("Authentication successful! You can close this tab now.");
   });
 
-  const readStatusFile = () => {
-    const statusFilePath = path.join(__dirname, "data", "status.json");
-    if (fs.existsSync(statusFilePath)) {
-      const fileContent = fs.readFileSync(statusFilePath, "utf-8");
-      return JSON.parse(fileContent);
-    }
-    return {};
-  };
-
-  const saveStatusFile = (status) => {
-    const statusFilePath = path.join(__dirname, "data", "status.json");
-    fs.writeFileSync(statusFilePath, JSON.stringify(status, null, 2));
-  };
-
-  const insertVideoToPlaylist = async (playlistId, video) => {
-    try {
-      await axios.post(
-        "https://www.googleapis.com/youtube/v3/playlistItems",
-        {
-          snippet: {
-            playlistId: playlistId,
-            position: 0,
-            resourceId: {
-              kind: "youtube#video",
-              videoId: video.videoId,
-            },
-          },
-        },
-        {
-          params: {
-            part: "snippet",
-            key: API_KEY,
-          },
-        }
-      );
-      console.log(`Inserted video ${video.videoId} into playlist ${playlistId}`);
-      return true;
-    } catch (error) {
-      console.error(`Failed to insert video ${video.videoId}: ${error.message}`);
-      return false;
-    }
-  };
-
   app.post("/insert/:playlist", async (req, res) => {
     const playlistId = req.params["playlist"];
     const startYear = parseInt(req.query.startYear);
     const endYear = parseInt(req.query.endYear);
 
     const videos = readVideosFromDataFolder(startYear, endYear);
-    const status = readStatusFile();
-
-    for (const video of videos) {
-      if (status[video.videoId] && status[video.videoId].addedToPlaylist) {
-        console.log(`Video ${video.videoId} already added to playlist ${playlistId}`);
-        continue;
-      }
-
-      const added = await insertVideoToPlaylist(playlistId, video);
-      if (added) {
-        status[video.videoId] = { addedToPlaylist: true };
-      }
-    }
-
-    saveStatusFile(status);
-
-    res.end(`${videos.length} videos processed for playlist ${playlistId}`);
-  });
-
-  app.post("/insert/:playlist", async (req, res) => {
-    const playlistId = req.params["playlist"];
-    const startYear = parseInt(req.query.startYear);
-    const endYear = parseInt(req.query.endYear);
-
-    const videos = readVideosFromDataFolder(startYear, endYear);
-    const status = readStatusFile();
+    const playlistItems = readAddedToPlaylistFile(playlistId);
+    console.log(`Read ${playlistItems.length} videos from playlist ${playlistId}`);
 
     oauth2Client.setCredentials(userCredential);
     const youtube = google.youtube({ version: "v3", auth: oauth2Client });
     for (const video of videos) {
-      if (status[video.videoId] && status[video.videoId].addedToPlaylist) {
-        console.log(`Video ${video.videoId} already added to playlist ${playlistId}`);
+      if (playlistItems.includes(video.videoId)) {
+        console.log(`Video ${video.videoId} already added to playlist ${playlistId}. Skipping...`);
         continue;
       }
 
@@ -152,11 +89,17 @@ async function main() {
             },
           },
         });
+        playlistItems.push(video.videoId);
         console.log(`Inserted video ${video.videoId} into playlist ${playlistId}`);
       } catch (error) {
         console.error(`Failed to insert video ${video.videoId}: ${error.message}`);
+        break;
       }
     }
+
+    const statusFilePath = path.join(".", "data", "playlistFiles", `${playlistId}.json`);
+    fs.writeFileSync(statusFilePath, JSON.stringify(playlistItems, null, 2));
+    console.log(`${playlistItems.length} total videos inserted into playlist`);
 
     res.end(`${videos.length} videos inserted into playlist`);
   });
